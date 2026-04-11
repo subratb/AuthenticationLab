@@ -1,0 +1,12 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+# Create project file on the fly to save setup time
+RUN dotnet new web -n AuthLab
+COPY src/Program.cs /src/AuthLab/Program.cs
+WORKDIR /src/AuthLab
+RUN dotnet publish -c Release -o /app
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
+WORKDIR /app
+COPY --from=build /app .
+ENTRYPOINT ["dotnet", "AuthLab.dll"]
