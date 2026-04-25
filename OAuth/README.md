@@ -220,7 +220,7 @@ app.MapGet("/callback", async (string code, string state, IHttpClientFactory fac
 
     // 2. USE THE TOKEN (Call the Vault)
     // We attach the token to the Authorization Header
-    var apiClient = new HttpClient();
+    var apiClient = factory.CreateClient();
     apiClient.DefaultRequestHeaders.Authorization = 
         new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
 
