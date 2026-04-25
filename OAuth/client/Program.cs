@@ -1,3 +1,4 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -65,6 +66,19 @@ app.MapGet("/callback", async (string code, string state, IHttpClientFactory fac
     var apiResponse = await apiClient.GetAsync(API_URL);
     var apiData = await apiResponse.Content.ReadAsStringAsync();
 
+    // B. Extract the ID Token
+    var idTokenString = jsonNode?["id_token"]?.ToString();
+    
+    if (string.IsNullOrEmpty(idTokenString))
+        return Results.Content("Error: No ID Token. Did you include 'openid' in the scope?");
+
+    // C. Decode the ID Token (The "Passport")
+    var handler = new JwtSecurityTokenHandler();
+    var jwt = handler.ReadJwtToken(idTokenString);
+
+    // D. Display the Claims
+    var claimsHtml = string.Join("", jwt.Claims.Select(c => $"<li><b>{c.Type}:</b> {c.Value}</li>"));
+
     // 3. Show Results
     var html = $@"
         <h1>OAuth Complete</h1>
@@ -73,6 +87,13 @@ app.MapGet("/callback", async (string code, string state, IHttpClientFactory fac
         
         <h3>Step 2: The Vault (Resource API Response)</h3>
         <pre style='background: #f4f4f4; padding: 10px; border: 1px solid #ccc;'>{apiData}</pre>
+
+        <h1>Authentication Successful</h1>
+        <h3>User Profile (From ID Token)</h3>
+        <ul>{claimsHtml}</ul>
+        <hr>
+        <h3>Raw Token</h3>
+        <textarea rows='4' cols='80'>{idTokenString}</textarea>
         
         <p>Authentication: Keycloak (8080) -> Client (8081) -> API (8082)</p>
     ";
