@@ -34,27 +34,44 @@ builder.Services.AddAuthentication(options =>
 })
 .AddOpenIdConnect(options =>
 {
-    // Where is Keycloak? (Internal Docker Network)
-    options.Authority = REALM_URL_INTERNAL;
-    
-    // Browser needs to see this URL (External Localhost)
-    options.MetadataAddress = $"{REALM_URL_EXTERNAL}/.well-known/openid-configuration";
-    options.RequireHttpsMetadata = false;    
+    // 1. INTERNAL: Use Docker Network alias for Back-Channel communication
+    // This prevents the "Connection Refused" error.
+    var internalKeycloak = "http://keycloak:8080/realms/sso-realm";
+    options.Authority = internalKeycloak;
+    options.MetadataAddress = $"{internalKeycloak}/.well-known/openid-configuration";
+    options.RequireHttpsMetadata = false;
 
+    // Standard Config
     options.ClientId = clientId;
-    options.ClientSecret = ""; // Public Client (No secret needed for Code Flow usually)
+    options.ClientSecret = ""; 
     options.ResponseType = OpenIdConnectResponseType.Code;
-    
     options.SaveTokens = true;
     options.Scope.Add("openid");
     options.Scope.Add("profile");
-    
-    // Docker Token Validation Hack
+
+    // 2. DOCKER HACK: Validate Issuer (Optional but recommended for dev)
     options.TokenValidationParameters = new Microsoft.IdentityModel.Tokens.TokenValidationParameters
     {
-        ValidateIssuer = false 
+        ValidateIssuer = false // Simplifies dev; strictly, it should match Keycloak's config
+    };
+
+    // 3. EXTERNAL: Fix the Browser Redirect (Front-Channel)
+    // When the App reads the metadata from 'keycloak:8080', it will think the 
+    // login page is at 'keycloak:8080'. The browser can't resolve that.
+    // We intercept the redirect and swap the domain to 'localhost'.
+    options.Events = new OpenIdConnectEvents
+    {
+        OnRedirectToIdentityProvider = context =>
+        {
+            // Replace internal container name with localhost for the user's browser
+            context.ProtocolMessage.IssuerAddress = 
+                context.ProtocolMessage.IssuerAddress.Replace("keycloak:8080", "localhost:8080");
+            
+            return Task.CompletedTask;
+        }
     };
 });
+
 
 builder.Services.AddAuthorization();
 
