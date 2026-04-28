@@ -2,6 +2,8 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.DataProtection;
+using StackExchange.Redis;  
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -15,14 +17,30 @@ var REALM_URL_EXTERNAL = "http://localhost:8080/realms/sso-realm";
 var clientId = Environment.GetEnvironmentVariable("CLIENT_ID") ?? "app-a";
 var appPort = Environment.GetEnvironmentVariable("APP_PORT") ?? "8081";
 
-// --- 2. REDIS SESSION STORE ---
-// In a real cluster, we store keys in Redis so scaling works.
+// --- 1. REDIS CONNECTION ---
+var redisConn = "redis-session:6379";
+var redis = ConnectionMultiplexer.Connect(redisConn);
+
+// --- 2. DATA PROTECTION (The "Keys") ---
+// This stores the encryption keys in Redis. 
+// If App A restarts, it downloads these keys and can still read your old cookies.
+builder.Services.AddDataProtection()
+    .PersistKeysToStackExchangeRedis(redis, "DataProtection-Keys")
+    .SetApplicationName("UniqueSsoMesh"); // Shared name so apps can share cookies if needed
+
+// --- 3. SESSION STATE (The "Data") ---
+// This stores actual session data in Redis
 builder.Services.AddStackExchangeRedisCache(options => {
-    options.Configuration = "redis-session:6379"; // Connects to container name 'redis-session'
+    options.Configuration = redisConn;
     options.InstanceName = $"{clientId}_";
 });
+builder.Services.AddSession(options => {
+    options.IdleTimeout = TimeSpan.FromMinutes(10);
+    options.Cookie.HttpOnly = true;
+    options.Cookie.IsEssential = true;
+});
 
-// --- 3. OIDC CONFIGURATION ---
+// --- 4. OIDC CONFIGURATION ---
 builder.Services.AddAuthentication(options =>
 {
     options.DefaultScheme = CookieAuthenticationDefaults.AuthenticationScheme;
@@ -52,21 +70,34 @@ builder.Services.AddAuthentication(options =>
     // 2. DOCKER HACK: Validate Issuer (Optional but recommended for dev)
     options.TokenValidationParameters = new Microsoft.IdentityModel.Tokens.TokenValidationParameters
     {
-        ValidateIssuer = false // Simplifies dev; strictly, it should match Keycloak's config
+        ValidateIssuer = false, // Simplifies dev; strictly, it should match Keycloak's config
+        // THE FIX: Tell .NET to map 'preferred_username' to Identity.Name
+        NameClaimType = "preferred_username"
     };
 
-    // 3. EXTERNAL: Fix the Browser Redirect (Front-Channel)
+    // 3. EXTERNAL: Fix the Browser Redirect (Front-Channel) - "Split-Horizon" configuration
     // When the App reads the metadata from 'keycloak:8080', it will think the 
     // login page is at 'keycloak:8080'. The browser can't resolve that.
     // We intercept the redirect and swap the domain to 'localhost'.
     options.Events = new OpenIdConnectEvents
     {
+        // 1. Fix LOGIN Redirect
         OnRedirectToIdentityProvider = context =>
         {
             // Replace internal container name with localhost for the user's browser
             context.ProtocolMessage.IssuerAddress = 
                 context.ProtocolMessage.IssuerAddress.Replace("keycloak:8080", "localhost:8080");
             
+            return Task.CompletedTask;
+        },
+        // 2. Fix LOGOUT Redirect
+        OnRedirectToIdentityProviderForSignOut = context =>
+        {
+            // The Metadata says logout is at "http://keycloak:8080/..."
+            // We rewrite it to "http://localhost:8080/..." so the browser can find it.
+            context.ProtocolMessage.IssuerAddress = 
+                context.ProtocolMessage.IssuerAddress.Replace("keycloak:8080", "localhost:8080");
+                
             return Task.CompletedTask;
         }
     };
@@ -79,14 +110,19 @@ var app = builder.Build();
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseSession();
 app.UseDeveloperExceptionPage();
 
 // --- UI ---
 app.MapGet("/", async (HttpContext context) =>
 {
-    var user = context.User.Identity?.IsAuthenticated == true 
-        ? context.User.Identity.Name 
-        : "Guest";
+    var user = "Guest";
+    
+    if (context.User.Identity?.IsAuthenticated == true) {
+        user = context.User.Identity.Name;
+        // FORCE REDIS WRITE: Store a timestamp in the session
+        context.Session.SetString("LastActive", DateTime.UtcNow.ToString());
+    }
 
     var style = clientId == "app-a" ? "background-color: #e3f2fd;" : "background-color: #fce4ec;";
     
@@ -97,6 +133,8 @@ app.MapGet("/", async (HttpContext context) =>
         <hr>
         <a href='/login'>Login (SSO)</a> | 
         <a href='/logout'>Logout</a>
+        <hr>
+        <p>Redis Status: <b>Session Active</b></p>
         <hr>
         <p>Try switching apps. If SSO works, you won't need to login again.</p>
         <ul>
@@ -116,10 +154,21 @@ app.MapGet("/login", (HttpContext context) => {
     return r;
     });
 
-app.MapGet("/logout", async (HttpContext context) =>
+app.MapGet("/logout", (HttpContext context) => 
 {
-    await context.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
-    await context.SignOutAsync(OpenIdConnectDefaults.AuthenticationScheme);
+    // We sign out of BOTH the Local Cookie and the Remote OIDC Session
+    return Results.SignOut(
+        authenticationSchemes: new[] 
+        { 
+            CookieAuthenticationDefaults.AuthenticationScheme, 
+            OpenIdConnectDefaults.AuthenticationScheme 
+        },
+        properties: new Microsoft.AspNetCore.Authentication.AuthenticationProperties 
+        { 
+            // Crucial: Tells Keycloak where to send the user after logout
+            RedirectUri = "/" 
+        }
+    );
 });
 
 app.Run($"http://0.0.0.0:{appPort}");
