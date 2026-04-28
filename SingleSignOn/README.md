@@ -266,19 +266,18 @@ app.Run($"http://0.0.0.0:{appPort}");
 ```
 ### 2. The Containerfile
 ```dockerfile
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
-RUN dotnet new web -n SsoApp
-RUN dotnet add SsoApp package Microsoft.AspNetCore.Authentication.OpenIdConnect
-RUN dotnet add SsoApp package Microsoft.Extensions.Caching.StackExchangeRedis
-COPY Program.cs /src/SsoApp/Program.cs
-WORKDIR /src/SsoApp
-RUN dotnet publish -c Release -o /app
+COPY src/* /src/
+WORKDIR /src
+RUN dotnet restore
+# Do not generate assembly info and target framework attributes during publish to avoid issues with the build cache.
+RUN dotnet publish -c Release /p:GenerateAssemblyInfo=false /p:GenerateTargetFrameworkAttribute=false -o /app
 
-FROM mcr.microsoft.com/dotnet/aspnet:8.0
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
 WORKDIR /app
 COPY --from=build /app .
-ENTRYPOINT ["dotnet", "SsoApp.dll"]
+ENTRYPOINT ["dotnet", "app.dll"]
 ```
 ## Phase 4: Deploy the "Mesh"
 We will build the image once, then run it twice with different configurations.
