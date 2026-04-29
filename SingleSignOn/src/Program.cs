@@ -9,8 +9,6 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Internal URL: How the Container talks to Keycloak
 var REALM_URL_INTERNAL = "http://keycloak:8080/realms/sso-realm"; 
-// External URL: How YOUR BROWSER talks to Keycloak
-var REALM_URL_EXTERNAL = "http://localhost:8080/realms/sso-realm"; 
 
 // --- 1. LOAD ENV VARS ---
 // We read the Client ID and Port from the environment
@@ -53,10 +51,9 @@ builder.Services.AddAuthentication(options =>
 .AddOpenIdConnect(options =>
 {
     // 1. INTERNAL: Use Docker Network alias for Back-Channel communication
-    // This prevents the "Connection Refused" error.
-    var internalKeycloak = "http://keycloak:8080/realms/sso-realm";
-    options.Authority = internalKeycloak;
-    options.MetadataAddress = $"{internalKeycloak}/.well-known/openid-configuration";
+    // This prevents the "Connection Refused" error.    
+    options.Authority = REALM_URL_INTERNAL;
+    options.MetadataAddress = $"{REALM_URL_INTERNAL}/.well-known/openid-configuration";
     options.RequireHttpsMetadata = false;
 
     // Standard Config

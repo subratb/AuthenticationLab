@@ -56,15 +56,17 @@ podman run -d --name keycloak \
 ```
 ## Phase 2: Configure Keycloak (The One-Time Setup)
 We need to tell Keycloak about our two separate applications.
-1. Login: `http://localhost:8080` (admin/admin).
-2. Create Realm: Name it `sso-realm`.
-3. Create User: Name: `employee`, Password: `password123`.
-4. Create Client 1 (App A):
+1. Open http://localhost:8080 in your browser.
+2. Click **Administration Console** and login (admin / admin).
+3. **Create Realm:** Hover over "Master" (top left) -> **Create Realm** -> Name: `sso-realm` -> Create.
+4. **Create User:** Users -> Add user -> Username: `employee` -> Email: employee@test.com -> Firstname: employee -> Lastname: employee -> EmailVerified -> Yes -> Create.
+    1. **Set Password:** Credentials Tab -> Set Password -> `password123` (Turn off "Temporary").
+5. Create Client 1 (App A):
     1. Client ID: `app-a`
     2. Valid Redirect URIs: `http://localhost:8081/signin-oidc`
     3. Valid post logout redirect URIs: `http://localhost:8081/signout-callback-oidc`
     4. Save.
-5. Create Client 2 (App B):
+6. Create Client 2 (App B):
     1. Client ID: `app-b`
     2. Valid Redirect URIs: `http://localhost:8082/signin-oidc`
     3. Valid post logout redirect URIs: `http://localhost:8082/signout-callback-oidc`
@@ -81,7 +83,10 @@ cd src
 dotnet new web -n app -o .
 ```
 We are going to use `SignOutAsync`,`OpenIdConnectResponseType` and authentication schemes from `Microsoft.AspNetCore.Authentication.OpenIdConnect` nuget package. Add them now.
+
 We are also going to use `AddStackExchangeRedisCache` from `Microsoft.Extensions.Caching.StackExchangeRedis` nuget package. Add them now.
+
+We are also going to use `PersistKeysToStackExchangeRedis` from `Microsoft.AspNetCore.DataProtection.StackExchangeRedis` nuget package. Add them now.
 ```bash
 dotnet add package Microsoft.AspNetCore.Authentication.OpenIdConnect
 dotnet add package Microsoft.Extensions.Caching.StackExchangeRedis
@@ -100,26 +105,24 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Internal URL: How the Container talks to Keycloak
 var REALM_URL_INTERNAL = "http://keycloak:8080/realms/sso-realm"; 
-// External URL: How YOUR BROWSER talks to Keycloak
-var REALM_URL_EXTERNAL = "http://localhost:8080/realms/sso-realm"; 
 
 // --- 1. LOAD ENV VARS ---
 // We read the Client ID and Port from the environment
 var clientId = Environment.GetEnvironmentVariable("CLIENT_ID") ?? "app-a";
 var appPort = Environment.GetEnvironmentVariable("APP_PORT") ?? "8081";
 
-// --- 2. REDIS CONNECTION ---
+// --- 1. REDIS CONNECTION ---
 var redisConn = "redis-session:6379";
 var redis = ConnectionMultiplexer.Connect(redisConn);
 
-// --- 3. DATA PROTECTION (The "Keys") ---
+// --- 2. DATA PROTECTION (The "Keys") ---
 // This stores the encryption keys in Redis. 
 // If App A restarts, it downloads these keys and can still read your old cookies.
 builder.Services.AddDataProtection()
     .PersistKeysToStackExchangeRedis(redis, "DataProtection-Keys")
     .SetApplicationName("UniqueSsoMesh"); // Shared name so apps can share cookies if needed
 
-// --- 4. SESSION STATE (The "Data") ---
+// --- 3. SESSION STATE (The "Data") ---
 // This stores actual session data in Redis
 builder.Services.AddStackExchangeRedisCache(options => {
     options.Configuration = redisConn;
@@ -131,7 +134,7 @@ builder.Services.AddSession(options => {
     options.Cookie.IsEssential = true;
 });
 
-// --- 5. OIDC CONFIGURATION ---
+// --- 4. OIDC CONFIGURATION ---
 builder.Services.AddAuthentication(options =>
 {
     options.DefaultScheme = CookieAuthenticationDefaults.AuthenticationScheme;
@@ -144,10 +147,9 @@ builder.Services.AddAuthentication(options =>
 .AddOpenIdConnect(options =>
 {
     // 1. INTERNAL: Use Docker Network alias for Back-Channel communication
-    // This prevents the "Connection Refused" error.
-    var internalKeycloak = "http://keycloak:8080/realms/sso-realm";
-    options.Authority = internalKeycloak;
-    options.MetadataAddress = $"{internalKeycloak}/.well-known/openid-configuration";
+    // This prevents the "Connection Refused" error.    
+    options.Authority = REALM_URL_INTERNAL;
+    options.MetadataAddress = $"{REALM_URL_INTERNAL}/.well-known/openid-configuration";
     options.RequireHttpsMetadata = false;
 
     // Standard Config
