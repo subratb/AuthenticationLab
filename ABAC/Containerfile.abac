@@ -1,0 +1,12 @@
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+COPY src/* /src/
+WORKDIR /src
+RUN dotnet restore
+# Do not generate assembly info and target framework attributes during publish to avoid issues with the build cache.
+RUN dotnet publish -c Release /p:GenerateAssemblyInfo=false /p:GenerateTargetFrameworkAttribute=false -o /app
+
+FROM mcr.microsoft.com/dotnet/aspnet:10.0
+WORKDIR /app
+COPY --from=build /app .
+ENTRYPOINT ["dotnet", "abac.dll"]
